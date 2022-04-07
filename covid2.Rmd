@@ -1,0 +1,220 @@
+---
+title: "Covid2"
+author: "Arturo Sirvent"
+date: "26/3/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(ggmap)
+library(maptools)
+library(tmap)
+library(geospatial) 
+library(sp)
+library(maps)
+library(ggthemes)
+library(lubridate)
+library(gganimate)
+library(tmaptools)
+library(leaflet)
+library(plotly)
+```
+
+## Cargamos los archivos:
+
+```{r}
+confirmed <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv"
+death <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv"
+recovered <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv"
+df.confirmed <- read_csv(confirmed)
+df.death <- read_csv(death)
+df.recovered <- read_csv(recovered)
+```
+
+Queremos tener también las indicencias diarias, asi que haremos la diferencia ente columnas (días).
+
+```{r}
+df.confirmed.aux<-subset(df.confirmed,select=-c(`Province/State`,Lat,Long))
+
+df.confirmed.delta<-subset(df.confirmed,select=c(`Country/Region`,Lat,Long))
+for (i in 3:length(df.confirmed.aux)){
+  dia_aux<-names(df.confirmed.aux)[i]
+  dia_aux_prev<-names(df.confirmed.aux)[i-1]
+  #calculamos la diferencia entre ambos dias
+  diff_aux<-df.confirmed.aux[dia_aux]-df.confirmed.aux[dia_aux_prev]
+  df.confirmed.delta[dia_aux]<-diff_aux
+  
+  # if (any(diff_aux<0)){
+  #   print(paste(dia_aux,df.confirmed.aux$`Country/Region`[diff_aux<0],diff_aux[diff_aux<0]))
+  # }
+}
+
+
+```
+
+Hay un problema con los valores de incidencia diaria menos que 0. Estamos suponiendo que los datos que tenemos es incidencia acumulada, por lo que no puede haber mañana menos que hoy NUNCA bajo ningún concepto.\
+Para dejar los datos más o menos limpios, vamos a poner a 0 toda inciencia diaria negativa.
+
+```{r}
+df.confirmed.delta[df.confirmed.delta<0]<-0
+
+```
+
+## Tratamos todos los datos para que tener el input del plot:
+
+Es importante tener las regiones para el cloropleth, para ello usamos la base de datos WORLD, y le añadimos los datos como columnas para cada pais.
+
+Los datos tienen países repetidos, porque tienen regiones, vamos a agruparlos.
+
+```{r}
+#df.confirmed.aux<-subset(df.confirmed,select=-c(`Province/State`,Lat,Long))
+conf<-df.confirmed.aux %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+conf_delta<-df.confirmed.delta %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+
+#esto hay que hacerlo para los otros dos
+head(conf)
+head(conf_delta)
+```
+
+```{r}
+plot(as.numeric(conf_delta[conf_delta$`Country/Region`=="Spain",-c(1,2,3,4)]),type="l")
+lines(as.numeric(conf_delta[conf_delta$`Country/Region`=="Italy",-c(1,2,3,4)]),col="blue")
+
+```
+
+```{r}
+#sacamos la info de las fronteras y las juntamos con todos los datos del covid
+data(World)
+
+#de world solo nos interesa el nombre, el iso_a3, el area, la población y los polígonos
+worl<-subset(World,select=c(iso_a3,name,area,pop_est,geometry))
+```
+
+Están todos los nombres en los dos, falta alguno¿? o estan mas deletreados¿?:
+
+```{r}
+print(length(conf$`Country/Region`))
+print(length(worl$name))
+k=0
+for (i in conf$`Country/Region`){
+  if (! i %in% worl$name){
+    print(paste(i,"no está en World"))
+    k=k+1
+  }
+}
+print(k)
+print("__________________________")
+k=0
+for (i in worl$name){
+  if (! i %in% conf$`Country/Region`){
+    print(paste(i,"no está en conf"))
+    k=k+1
+
+  }
+}
+print(k)
+
+
+```
+
+Por el número de paises, hay algunos de los que tenemos datos, pero si usamos el dataset de World, no tenemos polígonos, pero hay otros que sin embargo son problema de escritura.\
+Algunos son:
+
+-   Korea.\
+-   EEUU.\
+-   Taiwan.\
+-   S sudan.\
+-   Congo.\
+-   Central Africa\
+-   bOSNIA\
+-   mACEDONIA.\
+-   ...
+
+```{r}
+#ahora añadimos las columnas a ese dataframe
+conf_complete<-merge(worl,conf,by.x="name",by.y="Country/Region")
+
+```
+
+## Hacemos los plots:
+
+Vamos a hacer 3 tipos de plots:
+
+1.  Bubble-plots en un mapa. Tenemos long y lat de los puntos entonces no necesitamos nada más.\
+2.  Cloropleth. Para ello necesitamos tener un dataset con las fronteras de cada pais, así podemos colorear según lo que queramos.\
+3.  Algún tipo de bubble plot que evolucione con el tiempo.
+
+### Cloropleth
+
+Seleccionamos la fecha de interés:
+
+```{r}
+fecha="2/26/20"
+
+aux<-subset(conf_complete,select=c(fecha))
+plot(aux)
+
+```
+
+```{r}
+tmap_mode("plot")
+tm_shape(aux) +
+  tm_polygons(fecha)
+
+```
+
+Vamos a ver que plots interactivos podemos hacer con plotly:
+
+Para este plor tenemos que tener dos valores x e y, vamos a plotear confi vs recuperados o vs muertos.
+
+Tenemos que hacer un pivot long desos de tidyr, para que las fechas se pongan como valores de una volumna llamada fecha:
+
+```{r}
+conf_long <- conf_delta %>% pivot_longer(cols = -c(1,2,3) ,names_to = "fecha",values_to = "confirmed") 
+#tenemos que convertir en fechas la columna fecha
+conf_long<-conf_long %>% mutate(fecha=mdy(fecha))
+
+```
+
+Ahora plots sobre el mapa:
+
+```{r}
+codigos <- read.csv("https://raw.githubusercontent.com/plotly/datasets/master/2014_world_gdp_with_codes.csv")
+conf_codigos<-merge(conf_long,codigos%>%select(c("COUNTRY","CODE")),by.x="Country/Region",by.y="COUNTRY")
+conf_codigos
+```
+
+```{r}
+fig <- plot_ly(conf_codigos, type='choropleth', locations=conf_codigos$CODE, z=conf_codigos$`1/25/20`, text=conf_codigos$`Country/Region`)
+fig
+```
+
+```{r}
+conf_codigos %>% plot_ly(type='choropleth', locations=~CODE, z=~confirmed, text=~`Country/Region`,frame="2020-01-23") 
+```
+
+Ahora un bubble plots sobre el mapa que sean la animación que han pedido.
+
+```{r}
+world <- ggplot() +
+  borders("world", colour = "gray85", fill = "gray80") +
+  theme_map() 
+
+map <- world +
+  geom_point(aes(x = Long, y = Lat, size = `1/20/21`),
+             data = df.confirmed, 
+             colour = 'purple', alpha = .5)
+
+map
+```
+
+Vamos a añadir frames para que crezca con el tiempo:
+
+```{r}
+df.conf_long <- df.confirmed %>% pivot_longer(cols = -c(1,2,3,4) ,names_to = "fecha") 
+```

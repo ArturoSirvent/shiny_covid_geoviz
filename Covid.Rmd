@@ -1,0 +1,364 @@
+---
+title: "Covid"
+author: "Arturo Sirvent"
+date: "16/3/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# Especificamos las librerías necesarias en esta lista
+
+packages = c("maps","ggmap","leaflet","maptools","tidyverse","tmap","devtools","formatR","tmaptools","caret",'mapview','cartography')
+
+#use this function to check if each package is on the local machine
+#if a package is installed, it will be loaded
+#if any are not, the missing package(s) will be installed and loaded
+package.check <- lapply(packages, FUN = function(x) {
+  if (!require(x, character.only = TRUE)) {
+    install.packages(x, dependencies = TRUE,repos='http://cran.rediris.es')
+    library(x, character.only = TRUE)
+  }
+})
+
+#verify they are loaded
+search()
+```
+
+
+```{r}
+library(tidyverse)
+
+library(ggmap)
+#library(rgdal)
+#library(rgeos)
+library(maptools)
+library(tidyr)
+library(tmap)
+library(geospatial) # Instalado en ejercicios anteriores 
+library(sp)
+library(maps)
+#library(raster)
+library(tmaptools)
+library(leaflet)
+#library(cartography)
+library(dplyr)
+
+
+```
+
+```{r}
+confirmed <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv"
+death <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv"
+recovered <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv"
+df.confirmed <- read_csv(confirmed)
+df.death <- read_csv(death)
+df.recovered <- read_csv(recovered)
+
+```
+
+La mayoría no tiene States o subregiones, pero otras sí, como Australia:
+
+```{r}
+subset(df.confirmed,`Country/Region`=="Australia")
+```
+
+Veamos un ejemplo rápido de donde están localizamos los datos que estamos usando:
+
+```{r}
+qmplot(Long, Lat,data=df.confirmed,size=I(0.5))#df.confirmed$`1/24/2021`)
+```
+
+Investiguemos un poco los datos a ver si tienen algunos valores extraños:
+
+```{r}
+#sacamos todo lo de un pais cualquiera
+
+pais<-"India"
+datos_conf<-subset(df.confirmed,`Country/Region`==pais)%>%select(-c(1,2,3,4))
+datos_conf<-as.numeric(datos_conf)
+
+datos_deat<-subset(df.death,`Country/Region`==pais)%>%select(-c(1,2,3,4))
+names1<-names(datos_deat)
+
+datos_deat<-as.numeric(datos_deat)
+
+datos_reco<-subset(df.recovered,`Country/Region`==pais)%>%select(-c(1,2,3,4))
+names2<-names(datos_reco)
+
+datos_reco<-as.numeric(datos_reco)
+
+plot(datos_conf/max(datos_conf),type="l",col="red")
+lines(datos_deat/max(datos_deat),col="blue")
+lines(datos_reco/max(datos_reco))
+
+```
+
+Vemos como los datos de Recovered terminan de golpe para una fecha, a partir de ahí son 0 hasta entonces. Buscamos en la página sobre esto y mencionan que los últimos datos son actualizado en todas menos la de recuperados.
+
+```{r}
+datos_reco<-subset(df.recovered,`Country/Region`==df.recovered$`Country/Region`[1])%>%select(-c(1,2,3,4))
+datos_reco<-as.numeric(datos_reco)
+plot(datos_reco/max(datos_reco),type="l")
+for (i in df.recovered$`Country/Region`){
+  datos_reco<-subset(df.recovered,`Country/Region`==i)%>%select(-c(1,2,3,4))
+  datos_reco<-as.numeric(datos_reco[1,])
+  lines(datos_reco/max(datos_reco))
+}
+```
+
+Esto pasa para todos los paises y regiones, los datos simplemente no se actualizan más.
+
+¿Qué fecha es esa en la que se para? Como es aditivo, es monótono creciente y tendremos que es el máximo en cualquier serie.
+
+```{r}
+datos_reco<-subset(df.recovered,`Country/Region`==df.recovered$`Country/Region`[102])%>%select(-c(1,2,3,4))
+names=names(datos_reco)
+
+a<-which.max(datos_reco)
+print(names[a+1])
+
+```
+
+Para la representación de datos, usaremos también los datos de recuperados, pero limitaremos su uso a donde había datos (antes del 8/5/21).
+
+No solo nos puede interesar el número acumulado de las variables, sino que también sería interesante que tuvíeramos información diaria o semana, que nos indicara momentos de mayor incidencia (mayor pendiente en la curva de incidencia acumulada). Esto lo obtenemos simplemente haciendo una diferencia entre valores diarios o valores semanales. (Con las diferencias diarias luego ya podemos calcular las semanales).
+
+```{r}
+df.recovered
+```
+
+```{r}
+aux<-df.recovered %>% select(-c(1,2,3,4))%>%as.matrix.data.frame()
+diff_aux<-diff(t(aux),lag=1) #se aplica hacia abajo fila por fila
+df.recovered.daily<-as.data.frame(t(diff_aux))
+df.recovered.daily<-df.recovered.daily%>%mutate(df.recovered %>% select(c(1,2,3,4)))%>%relocate("Province/State","Country/Region","Lat","Long")
+
+aux<-df.death%>% select(-c(1,2,3,4))%>%as.matrix.data.frame()
+diff_aux<-diff(t(aux),lag=1) #se aplica hacia abajo fila por fila
+df.death.daily<-as.data.frame(t(diff_aux))
+df.death.daily<-df.death.daily%>%mutate(df.death %>% select(c(1,2,3,4)))%>%relocate("Province/State","Country/Region","Lat","Long")
+
+aux<-df.confirmed%>% select(-c(1,2,3,4))%>%as.matrix.data.frame()
+diff_aux<-diff(t(aux),lag=1) #se aplica hacia abajo fila por fila
+df.confirmed.daily<-as.data.frame(t(diff_aux))
+df.confirmed.daily<-df.confirmed.daily%>%mutate(df.confirmed %>% select(c(1,2,3,4)))%>%relocate("Province/State","Country/Region","Lat","Long")
+
+
+```
+
+No debería haber negativos sino en la última lectura, veamos:
+
+```{r}
+aux_days<-rowSums(diff_aux<0)
+aux_pais<-rowSums(t(diff_aux)<0)
+names(aux_pais)<-df.recovered$`Country/Region`
+table(aux_days)
+table(aux_pais)
+```
+
+Veamos que esta pasando, porque no incrementan siempre las lecturas.
+
+```{r}
+aux_pais[which.max(aux_pais)]
+```
+
+Veamos los datos de Francia:
+
+```{r}
+#df.recovered%>%filter(`Country/Region`=="France")%>%select(-c(1,2,3,4))%>%select(colSums(df.recovered.diff%>%filter(`Country/Region`=="France")%>%select(-c(1,2,3,4))<0))
+```
+
+¿?¿Hay algun error con los datos...
+
+## Esquema de trabajo
+
+Vamos a hacer una serie de mapas para mostrar la información:
+
+1.  Usando solo latitud y longitud del país, vamos a hacer mapas de calor y histogramas2d. También añadiendo las cifras encima.\
+2.  Daremos la opción de selecionar paises.\
+3.  En jugar de usar solo la localización puntual, usaremos el polígono que define el país.\
+4.  Con esto último haremos mapas cloropleth, y diferentes estilos.\
+5.  Por ultimo, añadir la función de hacer una animación entre x dia y x dia.
+
+Lo primero será sacar un mapa que abarque la región deseada. La región se determinará mediante los países de interés.
+
+```{r}
+#una lista con los paises de interés
+
+lista<-c("Spain","India")
+
+bbs<-geocode_OSM(lista)
+bbs
+bbs<-bbs%>%rename(Country=query)
+absolute_BB<-bbs%>%group_by()%>%summarise(left=min(lon_min,na.rm=TRUE),bottom=min(lat_min,na.rm=TRUE),right=max(lon_max,na.rm=TRUE),top=max(lat_max,na.rm=TRUE))
+centers<-bbs%>%select(c(1,2,3))
+centers
+absolute_BB
+
+```
+
+```{r}
+#ahora con la bounding box podemos sacar el mapa que corresponda
+
+a<-get_stamenmap(unlist(absolute_BB),zoom=2, maptype = "toner-lite") 
+a%>%ggmap
+```
+
+Ahora queremos información sobre sus fronteras, y también la información del covid disponible:
+
+```{r}
+
+limit_recov<-"8/5/21"
+lista<-c("Spain","India")
+
+#primero las indicencias acumuladas
+df.confirmed.select<-df.confirmed%>%filter(`Country/Region` %in% lista)
+df.death.select<-df.death%>%filter(`Country/Region` %in% lista)
+df.recovered.select<-df.recovered%>%filter(`Country/Region` %in% lista)
+  
+#pero tambien los valores diarios
+df.confirmed.daily.select<-df.confirmed.daily%>%filter(`Country/Region` %in% lista)
+df.death.daily.select<-df.death.daily%>%filter(`Country/Region` %in% lista)
+df.recovered.daily.select<-df.recovered.daily%>%filter(`Country/Region` %in% lista)
+  
+```
+
+
+
+```{r}
+head(countries_spdf@data)
+```
+
+Ahora que tenemos un objeto sp con los nombres, vamos a hacer un merge, para que se añada la información del covid a este dataset.
+
+Podemos tenerlo todo en un data set, o tenerlo en varios, por ahora lo tendremos en varios.
+
+```{r}
+#creamos los data sets
+countries_spdf_confirmed<-countries_spdf
+countries_spdf_confirmed@data<-countries_spdf_confirmed@data %>% left_join(df.confirmed,by=c("name"="Country/Region"))
+
+countries_spdf_death<-countries_spdf
+countries_spdf_death@data<-countries_spdf_death@data %>% left_join(df.death,by=c("name"="Country/Region"))
+
+countries_spdf_recovered<-countries_spdf
+countries_spdf_recovered@data<-countries_spdf_recovered@data %>% left_join(df.recovered,by=c("name"="Country/Region"))
+
+
+
+countries_spdf_confirmed_daily<-countries_spdf
+countries_spdf_confirmed_daily@data<-countries_spdf_confirmed_daily@data %>% left_join(df.confirmed.daily,by=c("name"="Country/Region"))
+
+countries_spdf_death_daily<-countries_spdf
+countries_spdf_death_daily@data<-countries_spdf_death_daily@data %>% left_join(df.death.daily,by=c("name"="Country/Region"))
+
+countries_spdf_recovered_daily<-countries_spdf
+countries_spdf_recovered_daily@data<-countries_spdf_recovered_daily@data %>% left_join(df.recovered.daily,by=c("name"="Country/Region"))
+
+
+#filtramos los seleccionados
+
+```
+
+
+
+Vamos a probar con ggmap y tmap y tal, a ver si lo podemos hacer más facil:
+
+```{r}
+World2<-World[World$name %in% countries_spdf_confirmed@data$name ,]
+
+
+nombres<-c()
+val_aux<-c()
+dia<-"1/25/20"
+for (i in countries_spdf_confirmed@data$name){
+  if ((! i %in% nombres) & (i %in% World2$name)){
+    nombres<-c(nombres,i)
+    val_aux<-c(val_aux,countries_spdf_confirmed@data[countries_spdf_confirmed@data$name==i,dia][1])
+  }
+  
+}
+
+
+
+World2%>% mutate(coln_new=val_aux)
+
+
+```
+
+
+```{r}
+countries_spdf_confirmed@data$name%in% World$name
+
+```
+
+
+```{r}
+tmap_mode("plot")
+data(World)
+tm_shape(World) +
+  tm_polygons("HPI")
+```
+
+
+```{r}
+str(World)
+```
+
+
+## Pruebas con Plotly  
+
+```{r}
+## Import required libraries
+## If packages are not installed, install the packages using install.packages() function
+library(gapminder) # to access gapminder dataset
+library(plotly) # for plotly charts, pipe % operator
+library(dplyr) # for any data manipulation operations; we used filter()
+
+
+# install.packages() ; if the package is not already installed
+
+## Quick glance of gapminder dataset through the str()
+gapminder %>% 
+  str()
+
+
+## Scatter plot for a specific year 2002
+gapminder %>% 
+  filter(year==2002) %>%  # filter data for the year 2002
+  plot_ly() %>% 
+  add_markers(x=~gdpPercap, y=~lifeExp) %>% 
+  layout(title="Plotly Scatter Plot",
+         xaxis=list(title="GDP Per Capita (log scale)", type="log"),
+         yaxis=list(title= "Life Expectancy")) %>% 
+  hide_legend()
+
+
+## Creating animation using the frame argument
+## Frame is transitioned over the years to bring a smooth animation effect
+gapminder %>% plot_ly() %>% add_markers(x=~gdpPercap, y=~lifeExp, frame=~year, 
+                                        text=~paste("Life Expectancy: ", round(lifeExp,1), 
+                                        "GDP Per Capita:", round(gdpPercap,1), 
+                                        "Country:", country), hoverinfo= "text") %>% 
+  layout(title="Animated Plotly Scatter Plot",
+         xaxis=list(title="GDP Per Capita (log scale)", type="log"),
+         yaxis=list(title= "Life Expectancy")) %>% 
+  hide_legend()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

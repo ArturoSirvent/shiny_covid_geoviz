@@ -1,0 +1,381 @@
+---
+title: "Covid Geo Visualization"
+author: "Arturo Sirvent"
+date: "27/3/2022"
+output: 
+  html_document:
+    toc: true
+    toc_float: true
+  
+---
+
+** Hosteado en shiny io :   [](https://artsir.shinyapps.io/covidviz/) **
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+# Librerias 
+
+```{r}
+# Especificamos las librerías necesarias en esta lista
+
+packages = c("tidyverse","ggmap","tmap","geospatial","sp","ggthemes","lubridate","tmaptools","plotly")
+
+#use this function to check if each package is on the local machine
+#if a package is installed, it will be loaded
+#if any are not, the missing package(s) will be installed and loaded
+package.check <- lapply(packages, FUN = function(x) {
+  if (!require(x, character.only = TRUE)) {
+    install.packages(x, dependencies = TRUE,repos='http://cran.rediris.es')
+    library(x, character.only = TRUE)
+  }
+})
+
+#verify they are loaded
+search()
+```
+
+
+```{r}
+# library(tidyverse)
+# library(ggmap)
+# library(maptools)
+# library(tmap)
+# library(geospatial) 
+# library(sp)
+# library(maps)
+# library(ggthemes)
+# library(lubridate)
+# library(gganimate)
+# library(tmaptools)
+# library(leaflet)
+# library(plotly)
+```
+
+
+# Cargamos los archivos:
+
+```{r}
+confirmed <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_confirmed_global.csv"
+death <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_deaths_global.csv"
+recovered <- "https://raw.githubusercontent.com/CSSEGISandData/COVID-19/master/csse_covid_19_data/csse_covid_19_time_series/time_series_covid19_recovered_global.csv"
+df.confirmed <- read_csv(confirmed)
+df.death <- read_csv(death)
+df.recovered <- read_csv(recovered)
+```
+
+
+# Preprocesado de datos
+
+
+Como queremos incidencias diarias, vamos a procesar los datos:  
+```{r}
+#para confirmados
+df.confirmed.aux<-subset(df.confirmed,select=-c(`Province/State`,Lat,Long))
+df.confirmed.delta<-subset(df.confirmed,select=c(`Country/Region`))
+
+for (i in 3:length(df.confirmed.aux)){
+  dia_aux<-names(df.confirmed.aux)[i]
+  dia_aux_prev<-names(df.confirmed.aux)[i-1]
+  #calculamos la diferencia entre ambos dias
+  diff_aux<-df.confirmed.aux[dia_aux]-df.confirmed.aux[dia_aux_prev]
+  df.confirmed.delta[dia_aux]<-diff_aux
+}
+#para muertos
+df.death.aux<-subset(df.death,select=-c(`Province/State`,Lat,Long))
+df.death.delta<-subset(df.death,select=c(`Country/Region`))
+
+for (i in 3:length(df.death.aux)){
+  dia_aux<-names(df.death.aux)[i]
+  dia_aux_prev<-names(df.death.aux)[i-1]
+  #calculamos la diferencia entre ambos dias
+  diff_aux<-df.death.aux[dia_aux]-df.death.aux[dia_aux_prev]
+  df.death.delta[dia_aux]<-diff_aux
+}
+
+#para recuperados
+df.recovered.aux<-subset(df.recovered,select=-c(`Province/State`,Lat,Long))
+df.recovered.delta<-subset(df.recovered,select=c(`Country/Region`))
+
+for (i in 3:length(df.recovered.aux)){
+  dia_aux<-names(df.recovered.aux)[i]
+  dia_aux_prev<-names(df.recovered.aux)[i-1]
+  #calculamos la diferencia entre ambos dias
+  diff_aux<-df.recovered.aux[dia_aux]-df.recovered.aux[dia_aux_prev]
+  df.recovered.delta[dia_aux]<-diff_aux
+}
+```
+
+Hay un problema con los valores de incidencia diaria menos que 0. Estamos suponiendo que los datos que tenemos es incidencia acumulada, por lo que no puede haber mañana menos que hoy NUNCA bajo ningún concepto.  
+Para dejar los datos más o menos limpios, vamos a poner a 0 toda inciencia diaria negativa.
+
+```{r}
+df.confirmed.delta[df.confirmed.delta<0]<-0
+df.death.delta[df.death.delta<0]<-0
+df.recovered.delta[df.recovered.delta<0]<-0
+```
+
+
+Es importante tener las regiones para el cloropleth, para ello usamos la base de datos WORLD, y le añadimos los datos como columnas para cada país.
+
+Los datos tienen países repetidos porque tienen distintas regiones, vamos a agruparlos, para hacer referencia a un solo polígono que represente a todo el pais.  
+
+```{r}
+#confirmed
+conf_grouped<-df.confirmed.aux %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+conf_delta_grouped<-df.confirmed.delta %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+
+#death
+death_grouped<-df.death.aux %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+death_delta_grouped<-df.death.delta %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+
+#recovered
+rec_grouped<-df.recovered.aux %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+rec_delta_grouped<-df.recovered.delta %>% group_by(`Country/Region`) %>%summarise(across(everything(),sum))
+
+```
+
+
+Ahora juntamos con el dataframe de World para tener un conjunto que tenga los polígonos de las posiciones.  
+Pero hay un problema, algunos nombres no están igual que los de nuetro dataset, para remediarlo vamos a renombrar aquellos que he apuntado como erroneos.  
+
+-   Korea.\  
+-   EEUU.\  
+-   Taiwan.\   
+-   S sudan.\   
+-   Congo.\  
+-   Central Africa\  
+-   Bosnia\   
+-   Macedonia\  
+  
+```{r}
+data(World)
+
+W<-World
+
+W$name<-as.vector(W$name)
+
+W$name[W$name=="Korea"]<-"Korea, South"
+W$name[W$name=="United States"]<-"US"
+W$name[W$name=="Taiwan*"]<-"Taiwan."
+W$name[W$name=="S. Sudan"]<-"South Sudan"
+W$name[W$name=="Central African Rep."]<-"Central African Republic"
+W$name[W$name=="Congo"]<-"Congo (Brazzaville)"
+W$name[W$name=="Macedonia"]<-"North Macedonia"
+W$name[W$name=="Bosnia and Herz."]<-"Bosnia and Herzegovina"
+
+```
+
+
+Mezclamos el dataset de covid y el de localizaciones:
+
+```{r}
+#ahora añadimos las columnas a ese dataframe
+#primero para la incidencia acumulada
+conf_complete<-merge(W,conf_grouped,by.x="name",by.y="Country/Region")
+death_complete<-merge(W,death_grouped,by.x="name",by.y="Country/Region")
+rec_complete<-merge(W,rec_grouped,by.x="name",by.y="Country/Region")
+
+#ahora para la diaria
+conf_delta_complete<-merge(W,conf_delta_grouped,by.x="name",by.y="Country/Region")
+death_delta_complete<-merge(W,death_delta_grouped,by.x="name",by.y="Country/Region")
+rec_delta_complete<-merge(W,rec_delta_grouped,by.x="name",by.y="Country/Region")
+
+```
+
+
+**Nota:** Estamos trabajando con World que tiene las localizaciones en formato **sf**, el paso a formato **sp** no es dificil, pero ya que el dataset estaba en dicho formato, no lo modificaremos.  
+
+Para tenerlo todo mucho más ordenado, vamos a hacer un pivot_longer sobre ls columnas de fecha y asi lo tendremos todo más arreglado, por fecha y 3 columnas una para cada:  recovered, confirmed y death.
+
+```{r}
+master_df <- conf_delta_grouped %>% pivot_longer(cols = -c(1) ,names_to = "fecha",values_to = "confirmed_delta") 
+#tenemos que convertir en fechas la columna fecha
+master_df<-master_df %>% mutate(fecha=mdy(fecha))%>%arrange(fecha,`Country/Region`)
+
+df_aux<- death_delta_grouped %>% pivot_longer(cols = -c(1) ,names_to = "fecha",values_to = "death_delta") 
+df_aux<-df_aux %>% mutate(fecha=mdy(fecha))%>%arrange(fecha,`Country/Region`)
+
+master_df["death_delta"]<-df_aux["death_delta"]
+
+df_aux<- rec_delta_grouped %>% pivot_longer(cols = -c(1) ,names_to = "fecha",values_to = "recovered_delta") 
+df_aux<-df_aux %>% mutate(fecha=mdy(fecha))%>%arrange(fecha,`Country/Region`)
+
+master_df["recovered_delta"]<-df_aux["recovered_delta"]
+
+
+#y ahora le añadimos los lat long 
+master_df<-merge(master_df,df.confirmed %>% select(c(`Country/Region`,Lat,Long)),by="Country/Region")
+str(master_df)
+
+#Notese que para aquellos que son un conjunto de regiones, se esta cogiendo la long y lat de solo uno de ellos (el último)
+
+```
+
+Por último, podemos poner si se trata de recov, death o confirmed como una columna (queremos tidy data).
+
+```{r}
+master_df<-master_df %>% pivot_longer(cols=c(confirmed_delta,death_delta,recovered_delta),names_to = "type")
+str(master_df)
+```
+
+
+# Representaciones de los datos:  
+
+Ahora que tenemos todos los datos preparados, podemos realizar los plots.
+
+Primero hagamos unos plots sencillos de las curvas de incidencia:
+
+```{r}
+#seleccionamos unos paises para plotear
+
+lista_paises<-c("Spain","France","Italy","China")
+
+#ahora se filtran esos paises para solo tratar con ellos en la represenciation
+
+df_plot<-master_df %>% filter( master_df$`Country/Region` %in% lista_paises )
+
+#ahora hacemos el plot con colores para los paises y diferentes plots para los tipos (contagios etc)
+
+ggplot(data = df_plot, aes(x=fecha,y=value)) + geom_line(aes(color=`Country/Region`)) + facet_wrap(~type,scales = "free",nrow=length(lista_paises))
+
+```
+
+Podemos hacer muchisimos mas plot de todo esto, pero el objetivo de este trabajo es la representación geografica de estos datos.  
+
+
+Para la representación geográfica, procederemos de tres formas:   
+
+1º- Representando puntualmente las incidencias (distinguiendo entre provincias/estados).  
+2º- Representar la incidencia en las regiones de cada pais mediante un cloropleth (las provincias se han agrupado), hacerlo estaticamente, seleccionando el día de interés.    
+3º- La misma aproximación que antes pero crear una sencilla animación que recorra los días.    
+
+
+```{r}
+#indicamos una fecha y hacemos un plot con burbujas en cada localización
+
+fecha_interes<-"1/29/21"
+
+world <- ggplot(data = df.confirmed[df.confirmed[fecha_interes]!=0,]) +
+  borders("world", colour = "gray85", fill = "gray80") +
+  theme_map() 
+
+map <- world +
+  geom_point(aes_string(x = "Long", y = "Lat", size= paste0("`",fecha_interes,"`") ), 
+             colour = 'red', alpha = .5)+scale_size_area(max_size=10)
+
+map
+
+
+```
+
+
+
+```{r,fig.width=6,fig.height=12}
+#usando los polígonos hacemos un mapa cloropleth para una fecha indicada
+fecha_interes<-"7/29/21"
+
+
+tmap_mode("plot")
+a<-tm_shape(conf_delta_complete) +
+  tm_polygons(fecha_interes,n=10,style="pretty")+ tm_layout(title="Confirmed")
+
+tmap_mode("plot")
+b<-tm_shape(death_delta_complete) +
+  tm_polygons(fecha_interes,n=10,style="pretty")+ tm_layout(title="Deaths")
+
+
+tmap_mode("plot")
+c<-tm_shape(rec_delta_complete) +
+  tm_polygons(fecha_interes,n=10,style="pretty") + tm_layout(title="Recovered") 
+
+tmap_arrange(a,b,c)
+```
+
+
+```{r,fig.width=6,fig.height=12}
+#alomejor queremos filtrarlos paises que queremos mostrar
+lista_paises<-c("Spain","Portugal","Italy")
+fecha_interes<-"1/29/21"
+
+aux1<-conf_delta_complete %>% filter(name %in% lista_paises)
+
+
+tmap_mode("plot")
+a<-tm_shape(aux1) +
+  tm_polygons(fecha_interes,n=10,style="pretty")+ tm_layout(title="Confirmed")
+
+aux2<-death_delta_complete %>% filter(name %in% lista_paises)
+
+tmap_mode("plot")
+b<-tm_shape(aux2) +
+  tm_polygons(fecha_interes,n=10,style="pretty")+ tm_layout(title="Deaths")
+
+aux3<-rec_delta_complete %>% filter(name %in% lista_paises)
+
+tmap_mode("plot")
+c<-tm_shape(aux3) +
+  tm_polygons(fecha_interes,n=10,style="pretty") + tm_layout(title="Recovered") 
+
+tmap_arrange(a,b,c)
+
+```
+
+
+Y por último, vamos a hacer una pequeña animación para que se muestre la evolución en un mapa cloropleth:
+
+```{r}
+#hacemos un animación sobre el tiempo  
+init<- dmy("01/12/20")
+fin<-dmy("09/1/21")
+
+master_time_slice<-master_df %>% filter(fecha>=init & fecha<=fin)
+
+#si no queremos cambiar el intervalo, simplemente hacemos lo siguiente
+
+#master_time_slice<-master_df
+
+#pero esto hara que tarde mucho en representarse
+
+
+```
+
+
+```{r}
+#para usar plotly necesitamos asignar a los paises un código de tres letras, lo obtenemos del siguiente link y lo añadimos al dataset.   
+
+codigos <- read.csv("https://raw.githubusercontent.com/plotly/datasets/master/2014_world_gdp_with_codes.csv")
+
+#aqui pasa lo mismo que con el dataset World
+codigos$COUNTRY[codigos$COUNTRY=="Korea"]<-"Korea, South"
+codigos$COUNTRY[codigos$COUNTRY=="United States"]<-"US"
+codigos$COUNTRY[codigos$COUNTRY=="Taiwan*"]<-"Taiwan."
+codigos$COUNTRY[codigos$COUNTRY=="S. Sudan"]<-"South Sudan"
+codigos$COUNTRY[codigos$COUNTRY=="Central African Rep."]<-"Central African Republic"
+codigos$COUNTRY[codigos$COUNTRY=="Congo"]<-"Congo (Brazzaville)"
+codigos$COUNTRY[codigos$COUNTRY=="Macedonia"]<-"North Macedonia"
+codigos$COUNTRY[codigos$COUNTRY=="Bosnia and Herz."]<-"Bosnia and Herzegovina"
+
+conf_codigos<-merge(master_time_slice,codigos%>%select(c("COUNTRY","CODE")),by.x="Country/Region",by.y="COUNTRY")
+
+#aqui seleccionamos el tipode datos que deseamos visualizar, si recuperados, confirmados...
+a<-conf_codigos %>% filter(type=="confirmed_delta")#%>%mutate(fecha=as.numeric(fecha))
+a%>%plot_geo() %>% add_trace(type='choropleth', locations=~CODE, z=~value,frame=~as.character(fecha)) 
+```
+
+Y con esto obtendríamos una animación entre las fechas deseadas y para la variable deseada (death, confirmed...) .  
+Obtenemos una barra para selecionar la decha deseada, o también podemos hacer clic en **play** y ver como cambia con el tiempo.   
+
+Como hay algunos paises que tienen una alta incidencia, la escala se ve perturbada y no nos deja ver la variacion de otros, en este caso tambien podemos selecionar solo unos pocos:  
+
+
+```{r}
+a %>%filter(`Country/Region` %in% lista_paises) %>%plot_geo() %>% add_trace(type='choropleth', locations=~CODE, z=~value,frame=~as.character(fecha)) 
+```
+
+Y para observar mejor podemos hacer zoom manualmente, ya que plotly nos representa mapas interactivos.  
+
+
